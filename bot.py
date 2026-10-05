@@ -1,12 +1,15 @@
 import os
-import re
 import asyncio
+import threading
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -15,8 +18,41 @@ TOKEN = os.getenv("BOT_TOKEN")
 
 LAB_URL = "https://www.cloudskillsboost.google/focuses/20774?parent=catalog"
 
+PORT = int(os.getenv("PORT", "8080"))
+
+
+# =========================
+# Cloud Run Health Server
+# =========================
+
+class HealthHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"GC.AHMED Run Bot is running")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
+    print(f"Health server listening on port {PORT}")
+    server.serve_forever()
+
+
+# =========================
+# /start
+# =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     keyboard = [
         [
             InlineKeyboardButton(
@@ -48,13 +84,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# =========================
+# /help
+# =========================
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     text = (
         "🆘 طريقة الاستخدام\n\n"
         "1️⃣ افتح Google Skills Boost.\n"
         "2️⃣ شغّل الـLab.\n"
         "3️⃣ أرسل رابط الـLab إلى البوت.\n"
-        "4️⃣ انتظر حتى انتهاء عملية الفحص والنشر.\n\n"
+        "4️⃣ انتظر حتى انتهاء العملية.\n\n"
         "📌 الأوامر:\n"
         "/start — بدء الاستخدام\n"
         "/help — المساعدة\n"
@@ -64,15 +105,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+# =========================
+# /status
+# =========================
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
         "📊 حالة الخدمة\n\n"
         "🟢 البوت يعمل بشكل طبيعي.\n"
-        "⏳ لم يتم تنفيذ عملية جديدة حالياً."
+        "☁️ Cloud Run: متصل\n"
+        "🤖 Telegram Bot: يعمل"
     )
 
 
+# =========================
+# استقبال رابط Google Skills
+# =========================
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     if not update.message or not update.message.text:
         return
 
@@ -86,14 +138,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "✅ تم استلام الرابط\n\n"
+        "📥 تم استلام رابط الـLab ✅\n\n"
         "🔎 جاري فحص الرابط..."
     )
 
     await asyncio.sleep(1)
 
     await update.message.reply_text(
-        "🔍 جاري تحليل بيانات الـLab..."
+        "🔍 جاري تحليل بيانات المشروع..."
     )
 
     await asyncio.sleep(1)
@@ -118,31 +170,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "✅ تم تجهيز الطلب بنجاح.\n\n"
-        "📌 ملاحظة: هذه النسخة تعرض خطوات العملية فقط، "
-        "ولم يتم ربطها بعد بحساب Google Cloud لتنفيذ النشر الحقيقي."
+        "📌 البوت يعمل الآن على Cloud Run.\n"
+        "🔧 خطوة الربط الفعلي مع Google Cloud "
+        "سيتم إضافتها في المرحلة التالية."
     )
 
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================
+# الأزرار
+# =========================
+
+async def button_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     query = update.callback_query
+
     await query.answer()
 
     if query.data == "status":
+
         await query.message.reply_text(
             "📊 حالة الخدمة\n\n"
-            "🟢 البوت يعمل."
+            "🟢 البوت يعمل.\n"
+            "☁️ Cloud Run: يعمل"
         )
 
 
+# =========================
+# Main
+# =========================
+
 def main():
+
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
 
+    # تشغيل HTTP server في الخلفية
+    health_thread = threading.Thread(
+        target=start_health_server,
+        daemon=True
+    )
+
+    health_thread.start()
+
+    # إنشاء Telegram application
     app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(
+        CommandHandler("start", start)
+    )
+
+    app.add_handler(
+        CommandHandler("help", help_command)
+    )
+
+    app.add_handler(
+        CommandHandler("status", status_command)
+    )
 
     app.add_handler(
         MessageHandler(
@@ -151,15 +237,16 @@ def main():
         )
     )
 
-    from telegram.ext import CallbackQueryHandler
-
     app.add_handler(
         CallbackQueryHandler(button_handler)
     )
 
-    print("Bot is running...")
+    print("GC.AHMED Run Bot is starting...")
 
-    app.run_polling()
+    # Telegram polling
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES
+    )
 
 
 if __name__ == "__main__":
