@@ -1,6 +1,7 @@
 import os
 import asyncio
 import threading
+import re
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -14,16 +15,41 @@ from telegram.ext import (
     filters,
 )
 
-TOKEN = os.getenv("BOT_TOKEN")
+from google.api_core.exceptions import AlreadyExists, GoogleAPICallError
+from google.cloud import run_v2
 
-LAB_URL = "https://www.cloudskillsboost.google/focuses/20774?parent=catalog"
+
+# ============================================================
+# Environment
+# ============================================================
+
+TOKEN = os.getenv("BOT_TOKEN")
 
 PORT = int(os.getenv("PORT", "8080"))
 
+REGION = os.getenv("CLOUD_RUN_REGION", "us-central1")
 
-# =========================
-# Cloud Run Health Server
-# =========================
+# صورة Docker التي سيتم نشرها في Cloud Run
+DEPLOY_IMAGE = os.getenv(
+    "DEPLOY_IMAGE",
+    "us-docker.pkg.dev/cloudrun/container/hello:latest"
+)
+
+# اسم الخدمة التي سينشئها البوت
+DEFAULT_SERVICE_NAME = os.getenv(
+    "CLOUD_RUN_SERVICE",
+    "gc-ahmed-service"
+)
+
+LAB_URL = (
+    "https://www.cloudskillsboost.google/"
+    "focuses/20774?parent=catalog"
+)
+
+
+# ============================================================
+# Cloud Run health server
+# ============================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
 
@@ -31,7 +57,9 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"GC.AHMED Run Bot is running")
+        self.wfile.write(
+            b"GC.AHMED Run Bot is running"
+        )
 
     def do_HEAD(self):
         self.send_response(200)
@@ -42,16 +70,53 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def start_health_server():
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
-    print(f"Health server listening on port {PORT}")
+    server = ThreadingHTTPServer(
+        ("0.0.0.0", PORT),
+        HealthHandler
+    )
+
+    print(
+        f"Health server listening on 0.0.0.0:{PORT}"
+    )
+
     server.serve_forever()
 
 
-# =========================
-# /start
-# =========================
+# ============================================================
+# Helpers
+# ============================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def valid_project_id(project_id: str) -> bool:
+    """
+    Google Cloud project IDs normally contain:
+    lowercase letters, numbers and hyphens.
+    """
+
+    return bool(
+        re.fullmatch(
+            r"[a-z][a-z0-9-]{4,28}[a-z0-9]",
+            project_id
+        )
+    )
+
+
+def valid_service_name(name: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"[a-z0-9]([-a-z0-9]*[a-z0-9])?",
+            name
+        )
+    )
+
+
+# ============================================================
+# /start
+# ============================================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     keyboard = [
         [
@@ -71,11 +136,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👋 مرحباً بك في GC.AHMED Run\n\n"
         "☁️ بوت إنشاء خدمات Google Cloud Run\n\n"
-        "📌 أرسل رابط Google Skills Boost الخاص بالـLab "
-        "وسأبدأ معالجة الطلب تلقائياً.\n\n"
+        "📌 أرسل رابط Google Skills Boost.\n\n"
+        "ثم أرسل Project ID الخاص بالمشروع "
+        "إذا لم يكن معروفًا للبوت.\n\n"
         "⏱ مدة الـLab: 4:30 ساعات\n\n"
-        "احفظ رابط الـLab أو أرسل /start في أي وقت.\n\n"
-        "Welcome my friends, this is a GoogleCloud codes generator"
+        "Welcome my friends, this is a "
+        "GoogleCloud codes generator"
     )
 
     await update.message.reply_text(
@@ -84,101 +150,245 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# =========================
+# ============================================================
 # /help
-# =========================
+# ============================================================
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     text = (
         "🆘 طريقة الاستخدام\n\n"
-        "1️⃣ افتح Google Skills Boost.\n"
-        "2️⃣ شغّل الـLab.\n"
-        "3️⃣ أرسل رابط الـLab إلى البوت.\n"
-        "4️⃣ انتظر حتى انتهاء العملية.\n\n"
+        "1️⃣ شغّل Google Skills Boost.\n"
+        "2️⃣ أرسل رابط الـLab.\n"
+        "3️⃣ أرسل Project ID.\n"
+        "4️⃣ سيبدأ البوت إنشاء خدمة Cloud Run.\n"
+        "5️⃣ عند النجاح سيُرسل رابط الخدمة.\n\n"
         "📌 الأوامر:\n"
         "/start — بدء الاستخدام\n"
         "/help — المساعدة\n"
-        "/status — حالة الخدمة"
+        "/status — حالة البوت"
     )
 
     await update.message.reply_text(text)
 
 
-# =========================
+# ============================================================
 # /status
-# =========================
+# ============================================================
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
         "📊 حالة الخدمة\n\n"
-        "🟢 البوت يعمل بشكل طبيعي.\n"
-        "☁️ Cloud Run: متصل\n"
-        "🤖 Telegram Bot: يعمل"
+        "🟢 Telegram Bot: يعمل\n"
+        "☁️ Cloud Run API: جاهز للاستخدام\n"
+        f"🌍 Region: {REGION}\n"
+        f"🐳 Image: {DEPLOY_IMAGE}"
     )
 
 
-# =========================
-# استقبال رابط Google Skills
-# =========================
+# ============================================================
+# Deploy Cloud Run
+# ============================================================
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def deploy_cloud_run(
+    project_id: str,
+    service_name: str
+):
+    """
+    Creates a real Cloud Run service using
+    the Cloud Run v2 Python client.
+    """
 
-    if not update.message or not update.message.text:
+    client = run_v2.ServicesClient()
+
+    parent = (
+        f"projects/{project_id}"
+        f"/locations/{REGION}"
+    )
+
+    service = run_v2.Service(
+        name=(
+            f"{parent}/services/"
+            f"{service_name}"
+        ),
+
+        ingress=run_v2.IngressTraffic.INGRESS_TRAFFIC_ALL,
+
+        template=run_v2.RevisionTemplate(
+            containers=[
+                run_v2.Container(
+                    image=DEPLOY_IMAGE
+                )
+            ]
+        )
+    )
+
+    request = run_v2.CreateServiceRequest(
+        parent=parent,
+        service=service,
+        service_id=service_name
+    )
+
+    operation = client.create_service(
+        request=request
+    )
+
+    print(
+        f"Creating Cloud Run service: "
+        f"{service_name}"
+    )
+
+    result = operation.result(
+        timeout=1200
+    )
+
+    return result.uri
+
+
+# ============================================================
+# Receive messages
+# ============================================================
+
+async def handle_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.message:
         return
 
     message = update.message.text.strip()
 
-    if "cloudskillsboost.google" not in message:
+    # --------------------------------------------------------
+    # Step 1: Google Skills URL
+    # --------------------------------------------------------
+
+    if (
+        "cloudskillsboost.google" in message
+        or "skillsboost.google" in message
+    ):
+
+        context.user_data["lab_url"] = message
+        context.user_data["waiting_project"] = True
+
         await update.message.reply_text(
-            "❌ لم أتعرف على الرابط.\n\n"
-            "أرسل رابط Google Skills Boost الصحيح."
+            "✅ تم استلام رابط الـLab.\n\n"
+            "🔎 جاري تجهيز الطلب...\n\n"
+            "📌 الآن أرسل Project ID الخاص بالمشروع.\n\n"
+            "مثال:\n"
+            "qwiklabs-gcp-01-xxxxxxxxxxxx"
         )
+
         return
 
+    # --------------------------------------------------------
+    # Step 2: Project ID
+    # --------------------------------------------------------
+
+    if context.user_data.get("waiting_project"):
+
+        project_id = message
+
+        if not valid_project_id(project_id):
+
+            await update.message.reply_text(
+                "❌ Project ID غير صحيح.\n\n"
+                "أرسله بهذا الشكل:\n"
+                "qwiklabs-gcp-01-xxxxxxxxxxxx"
+            )
+
+            return
+
+        context.user_data["project_id"] = project_id
+        context.user_data["waiting_project"] = False
+
+        await update.message.reply_text(
+            "✅ تم استلام Project ID.\n\n"
+            "🔎 جاري فحص المشروع..."
+        )
+
+        await asyncio.sleep(1)
+
+        await update.message.reply_text(
+            "☁️ جاري الاتصال بـ Cloud Run API..."
+        )
+
+        await asyncio.sleep(1)
+
+        service_name = (
+            f"{DEFAULT_SERVICE_NAME}-"
+            f"{update.effective_user.id}"
+        )
+
+        # Cloud Run service names have length limits
+        service_name = service_name[:49]
+
+        await update.message.reply_text(
+            "🚀 جاري إنشاء خدمة Cloud Run...\n\n"
+            f"📦 Service: {service_name}\n"
+            f"🌍 Region: {REGION}"
+        )
+
+        try:
+
+            # Run blocking Google API operation
+            # outside Telegram event loop
+            url = await asyncio.to_thread(
+                deploy_cloud_run,
+                project_id,
+                service_name
+            )
+
+            await update.message.reply_text(
+                "🎉 تم إنشاء خدمة Cloud Run بنجاح!\n\n"
+                f"☁️ المشروع:\n{project_id}\n\n"
+                f"📦 الخدمة:\n{service_name}\n\n"
+                f"🔗 رابط الخدمة:\n{url}"
+            )
+
+        except AlreadyExists:
+
+            await update.message.reply_text(
+                "⚠️ الخدمة موجودة مسبقًا.\n\n"
+                "غيّر اسم الخدمة أو أرسل الطلب مرة أخرى."
+            )
+
+        except GoogleAPICallError as e:
+
+            await update.message.reply_text(
+                "❌ حدث خطأ من Google Cloud.\n\n"
+                f"التفاصيل:\n{str(e)[:1500]}"
+            )
+
+        except Exception as e:
+
+            await update.message.reply_text(
+                "❌ فشل إنشاء Cloud Run.\n\n"
+                f"الخطأ:\n{str(e)[:1500]}"
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # Unknown message
+    # --------------------------------------------------------
+
     await update.message.reply_text(
-        "📥 تم استلام رابط الـLab ✅\n\n"
-        "🔎 جاري فحص الرابط..."
+        "📌 أرسل رابط Google Skills Boost أولاً.\n\n"
+        "استخدم /start للبدء."
     )
 
-    await asyncio.sleep(1)
 
-    await update.message.reply_text(
-        "🔍 جاري تحليل بيانات المشروع..."
-    )
-
-    await asyncio.sleep(1)
-
-    await update.message.reply_text(
-        "☁️ جاري تجهيز Cloud Run..."
-    )
-
-    await asyncio.sleep(1)
-
-    await update.message.reply_text(
-        "🚀 جاري إنشاء الخدمة..."
-    )
-
-    await asyncio.sleep(1)
-
-    await update.message.reply_text(
-        "⏳ جاري انتظار اكتمال النشر..."
-    )
-
-    await asyncio.sleep(2)
-
-    await update.message.reply_text(
-        "✅ تم تجهيز الطلب بنجاح.\n\n"
-        "📌 البوت يعمل الآن على Cloud Run.\n"
-        "🔧 خطوة الربط الفعلي مع Google Cloud "
-        "سيتم إضافتها في المرحلة التالية."
-    )
-
-
-# =========================
-# الأزرار
-# =========================
+# ============================================================
+# Buttons
+# ============================================================
 
 async def button_handler(
     update: Update,
@@ -192,22 +402,24 @@ async def button_handler(
     if query.data == "status":
 
         await query.message.reply_text(
-            "📊 حالة الخدمة\n\n"
-            "🟢 البوت يعمل.\n"
-            "☁️ Cloud Run: يعمل"
+            "📊 حالة البوت\n\n"
+            "🟢 Telegram: يعمل\n"
+            "☁️ Cloud Run API: متاح"
         )
 
 
-# =========================
+# ============================================================
 # Main
-# =========================
+# ============================================================
 
 def main():
 
     if not TOKEN:
-        raise RuntimeError("BOT_TOKEN is not set")
+        raise RuntimeError(
+            "BOT_TOKEN is not set"
+        )
 
-    # تشغيل HTTP server في الخلفية
+    # Cloud Run health server
     health_thread = threading.Thread(
         target=start_health_server,
         daemon=True
@@ -215,19 +427,33 @@ def main():
 
     health_thread.start()
 
-    # إنشاء Telegram application
-    app = Application.builder().token(TOKEN).build()
-
-    app.add_handler(
-        CommandHandler("start", start)
+    # Telegram application
+    app = (
+        Application
+        .builder()
+        .token(TOKEN)
+        .build()
     )
 
     app.add_handler(
-        CommandHandler("help", help_command)
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
     app.add_handler(
-        CommandHandler("status", status_command)
+        CommandHandler(
+            "help",
+            help_command
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "status",
+            status_command
+        )
     )
 
     app.add_handler(
@@ -238,12 +464,15 @@ def main():
     )
 
     app.add_handler(
-        CallbackQueryHandler(button_handler)
+        CallbackQueryHandler(
+            button_handler
+        )
     )
 
-    print("GC.AHMED Run Bot is starting...")
+    print(
+        "GC.AHMED Run Bot started."
+    )
 
-    # Telegram polling
     app.run_polling(
         allowed_updates=Update.ALL_TYPES
     )
