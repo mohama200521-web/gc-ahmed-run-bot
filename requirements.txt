@@ -1,0 +1,4 @@
+python-telegram-bot==22.5
+google-cloud-run==0.10.15
+google-auth==2.40.3
+requests==2.32.5
